@@ -1075,7 +1075,6 @@ int64 static GetBlockValue(int nHeight, int64 nFees)
 static const int64 nTargetTimespan = 6 * 60 * 60; // 6 hours
 static const int64 nTargetSpacing = 10 * 60;
 static const int64 nMinSpacing = 30;    // Absolute minimum spacing
-static const int64 nMinSpacingV2 = 9*60; // catcoin >= 0.9.2
 static const int64 nInterval = nTargetTimespan / nTargetSpacing;
 
 static const int64 nTargetTimespanOld = 14 * 24 * 60 * 60; // two weeks
@@ -1120,7 +1119,7 @@ static unsigned int GetNextWork_CatPrime(const CBlockIndex* pindexLast, const CB
      * These should eventually come from some sort of heavycoin
      * style stake-voting. Numbers must be monotonically increasing
      */
-    int lookbacks[] = { 2, 3, 5, 7, 13, 17, 19, 23, 29, 31, 37};
+    int lookbacks[] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
     int blocks = 0;
     int64_t count = 0;
     int64_t actual = 0;
@@ -1128,10 +1127,12 @@ static unsigned int GetNextWork_CatPrime(const CBlockIndex* pindexLast, const CB
     const CBlockIndex* pindex = pindexLast;
     int64_t LastTime = pindex->GetBlockTime();
     int64_t FirstTime = LastTime;
+    /* if debugprint? */
+    printf("CatPrime %d blocks:avg ", pindex->nHeight);
     for (unsigned int i = 0; pindex && (i < sizeof(lookbacks)/sizeof(lookbacks[0])); i++){
+        /* this might be more stable if we did the clamping on each interval, but
+         * that requires a rewrite */
         while (pindex && (blocks < lookbacks[i])){
-            /* okay technically this could go outside this loop but that's
-               what optimizing compilers are for */
             pindex = pindex->pprev; // next block
             if (pindex) {
                 blocks++;
@@ -1140,16 +1141,17 @@ static unsigned int GetNextWork_CatPrime(const CBlockIndex* pindexLast, const CB
         }
         count += blocks;
         actual += LastTime - FirstTime;
-        printf("i %d blocks %d nheight %d count %ld actual %ld avg %ld\n",
-                i, blocks, pindex->nHeight, count, actual, actual/count);
+        //printf("i %d blocks %d nheight %d count %ld actual %ld avg %ld\n",
+        //      i, blocks, pindex->nHeight, count, actual, actual/count);
+        printf("%d:%ld ", blocks, actual/count);
     }
-    
+    printf("%d\n", pindex->nHeight);
+
     int64_t target = nTargetSpacing * count;
-    printf("CatPrime target %ld , actual %ld  (count %ld)\n", target, actual, count);
 
     /* now clamp ranges.. lower limits difficulty increase */
     int64_t lower = (target - (target/4));
-    int64_t upper = (target + (target/2));
+    int64_t upper = (target + (target/2)); // TODO: configurable? issue with 9 minute minimum?
     if (actual < lower){
         printf("CatPrime target clamped from %ld to lower %ld\n", actual, lower); 
         actual = lower;
@@ -1167,8 +1169,8 @@ static unsigned int GetNextWork_CatPrime(const CBlockIndex* pindexLast, const CB
     if (bnNew > bnProofOfWorkLimit)
         bnNew = bnProofOfWorkLimit;
 
-    printf("CatPrime Before: %08x  %s\n", pindexLast->nBits, CBigNum().SetCompact(pindexLast->nBits).getuint256().ToString().c_str());
-    printf("CatPrime After:  %08x  %s\n", bnNew.GetCompact(), bnNew.getuint256().ToString().c_str());
+    printf("CatPrime target: %ld actual: %ld count: %ld Before: %08x After: %08x\n", 
+        target, actual, count, pindexLast->nBits, bnNew.GetCompact());
     return bnNew.GetCompact();
 }
 
@@ -2447,7 +2449,7 @@ bool CBlock::AcceptBlock(CValidationState &state, CDiskBlockPos *dbp)
 
     int64_t time_allow = -30; // original 30 seconds
     if (nHeight > forkDigiShield) {
-        time_allow = nMinSpacingV2; // 9 minute minimum
+        time_allow = MIN_BLOCK_SPACING; // 9 minute minimum
     } else if (nHeight > fork4Block){
         time_allow = nMinSpacing;
     }

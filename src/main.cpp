@@ -1075,6 +1075,7 @@ int64 static GetBlockValue(int nHeight, int64 nFees)
 static const int64 nTargetTimespan = 6 * 60 * 60; // 6 hours
 static const int64 nTargetSpacing = 10 * 60;
 static const int64 nMinSpacing = 30; 	// Absolute minimum spacing
+static const int64 nMinSpacingV2 = 9*60; // catcoin >= 0.9.2
 static const int64 nInterval = nTargetTimespan / nTargetSpacing;
 
 static const int64 nTargetTimespanOld = 14 * 24 * 60 * 60; // two weeks
@@ -1109,8 +1110,55 @@ unsigned int ComputeMinWork(unsigned int nBase, int64 nTime)
 
 static int fork3Block = 27260; // FIXME move to top...
 static int fork4Block = 27680; // Acceptblock needs this
+//static int forkDigiShield = 31041; //real proposed block
+static int forkDigiShield = 31023; // test block 
 
-unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
+static unsigned int GetNextWork_DigiV1(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
+{
+    int blockstogoback = 0;
+    
+    // Genesis block
+    if (pindexLast == NULL) return bnProofOfWorkLimit.GetCompact();
+        
+    // Go back the full period unless it's the first retarget after genesis. Code courtesy of Art Forz
+    blockstogoback = nInterval-1;
+    if ((pindexLast->nHeight+1) != nInterval) blockstogoback = nInterval;
+    
+    // Go back by what we want to be 14 days worth of blocks
+    const CBlockIndex* pindexFirst = pindexLast;
+    for (int i = 0; pindexFirst && i < blockstogoback; i++)
+        pindexFirst = pindexFirst->pprev;
+    assert(pindexFirst);
+
+    // Limit adjustment step
+    int64_t nActualTimespan = pindexLast->GetBlockTime() - pindexFirst->GetBlockTime();
+    printf("nActualTimespan = %"PRI64d"  before bounds\n", nActualTimespan);
+    
+    // thanks to RealSolid & WDC for this code
+    if (nActualTimespan < (nTargetTimespan - (nTargetTimespan/4)) ){ 
+	nActualTimespan = (nTargetTimespan - (nTargetTimespan/4));
+    }
+    if (nActualTimespan > (nTargetTimespan + (nTargetTimespan/2)) ){
+	nActualTimespan = (nTargetTimespan + (nTargetTimespan/2));
+    }
+
+    CBigNum bnNew;
+    bnNew.SetCompact(pindexLast->nBits);
+    bnNew *= nActualTimespan;
+    bnNew /= nTargetTimespan;
+
+    if (bnNew > bnProofOfWorkLimit)
+        bnNew = bnProofOfWorkLimit;
+
+    /// debug print
+    printf("RETARGET: nTargetTimespan = %" PRI64d"   nActualTimespan = %" PRI64d"\n", nTargetTimespan, nActualTimespan);
+    //printf("Before: %08x  %s\n", pindexLast->nBits, CBigNum().SetCompact(pindexLast->nBits).getuint256().ToString().c_str());
+    //printf("After:  %08x  %s\n", bnNew.GetCompact(), bnNew.getuint256().ToString().c_str());
+
+    return bnNew.GetCompact();
+}
+
+unsigned int static GetNextWork_CatLegacy(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
 {
     int i;
 
@@ -1242,10 +1290,9 @@ unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast, const CBl
         bnNew = bnProofOfWorkLimit;
 
     /// debug print
-    printf("GetNextWorkRequired RETARGET\n");
-    printf("nTargetTimespan = %"PRI64d"    nActualTimespan = %"PRI64d"\n", nTargetTimespanLocal, nActualTimespan);
-    printf("Before: %08x  %s\n", pindexLast->nBits, CBigNum().SetCompact(pindexLast->nBits).getuint256().ToString().c_str());
-    printf("After:  %08x  %s\n", bnNew.GetCompact(), bnNew.getuint256().ToString().c_str());
+    printf("RETARGET nTargetTimespan = %"PRI64d"    nActualTimespan = %"PRI64d"\n", nTargetTimespanLocal, nActualTimespan);
+    //printf("Before: %08x  %s\n", pindexLast->nBits, CBigNum().SetCompact(pindexLast->nBits).getuint256().ToString().c_str());
+    //printf("After:  %08x  %s\n", bnNew.GetCompact(), bnNew.getuint256().ToString().c_str());
 	}
 /*
 PID formula
@@ -1331,6 +1378,14 @@ If New diff < 0, then set static value of 0.0001 or so.
 	} // End Fork 3 to use a PID routine instead of the other 2 forks routine
 	 
 	return bnNew.GetCompact();
+}
+
+unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
+{
+    if (pindexLast->nHeight < forkDigiShield)
+        return GetNextWork_CatLegacy(pindexLast, pblock);
+    else
+        return GetNextWork_DigiV1(pindexLast, pblock);
 }
 
 bool CheckProofOfWork(uint256 hash, unsigned int nBits)
@@ -2328,12 +2383,17 @@ bool CBlock::AcceptBlock(CValidationState &state, CDiskBlockPos *dbp)
         if (nBits != GetNextWorkRequired(pindexPrev, this))
             return state.DoS(100, error("AcceptBlock(height=%d) : incorrect proof of work", nHeight));
 
-	if (nHeight > fork4Block){
-            if (GetBlockTime() <= (pindexPrev->GetBlockTime() + nMinSpacing))
-                return state.Invalid(error("AcceptBlock(height=%d) : block's timestamp (%"PRI64d") is too soon after prev(%"PRI64d")", nHeight, GetBlockTime(), pindexPrev->GetBlockTime()));
-	} else if (nHeight > fork3Block) {
-            if (GetBlockTime() <= pindexPrev->GetBlockTime() - 30) // allow 30 sec
-                return state.Invalid(error("AcceptBlock(height=%d) : block's timestamp (%"PRI64d") is too soon after prev->prev(%"PRI64d")", nHeight, GetBlockTime(), pindexPrev->GetBlockTime()));
+	int64_t time_allow = -30; // original 30 seconds
+	if (nHeight > forkDigiShield) {
+		time_allow = nMinSpacingV2;	// 9 minute minimum
+	} else if (nHeight > fork4Block){
+		time_allow = nMinSpacing;
+	}
+
+	printf("block nHeight %d time_allow %d\n", nHeight, time_allow);
+	if (nHeight > fork3Block) {
+            if (GetBlockTime() <= pindexPrev->GetBlockTime() + time_allow) // see above
+                return state.Invalid(error("AcceptBlock(height=%d) : block's timestamp (%"PRI64d") is too soon after prev->(%"PRI64d")", nHeight, GetBlockTime(), pindexPrev->GetBlockTime()));
 	} else {
             // Check timestamp against prev
             if (GetBlockTime() <= pindexPrev->GetMedianTimePast())
